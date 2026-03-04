@@ -1,0 +1,21 @@
+[package]
+name = "dataxlr8-email-mcp"
+version = "0.1.0"
+edition = "2024"
+description = "Email MCP server for DataXLR8 platform — Resend API, templates, logging"
+repository = "https://github.com/pdaxt/dataxlr8-email-mcp"
+
+[dependencies]
+rmcp = { version = "0.17", features = ["server", "transport-io"] }
+dataxlr8-mcp-core = { path = "../dataxlr8-mcp-core" }
+sqlx = { version = "0.8", features = [
+    "runtime-tokio", "tls-rustls", "postgres", "migrate", "chrono", "uuid",
+] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+tracing = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
