@@ -1,9 +1,9 @@
+use dataxlr8_mcp_core::mcp::{make_schema, empty_schema, json_result, error_result, get_str, get_i64, get_str_array};
 use dataxlr8_mcp_core::Database;
 use rmcp::model::*;
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::ServerHandler;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use tracing::info;
 
 // ============================================================================
@@ -68,32 +68,8 @@ struct ResendResponse {
 }
 
 // ============================================================================
-// Tool schema helpers
+// Tool definitions
 // ============================================================================
-
-fn make_schema(
-    properties: serde_json::Value,
-    required: Vec<&str>,
-) -> Arc<serde_json::Map<String, serde_json::Value>> {
-    let mut m = serde_json::Map::new();
-    m.insert("type".into(), serde_json::Value::String("object".into()));
-    m.insert("properties".into(), properties);
-    if !required.is_empty() {
-        m.insert(
-            "required".into(),
-            serde_json::Value::Array(
-                required.into_iter().map(|s| serde_json::Value::String(s.into())).collect(),
-            ),
-        );
-    }
-    Arc::new(m)
-}
-
-fn empty_schema() -> Arc<serde_json::Map<String, serde_json::Value>> {
-    let mut m = serde_json::Map::new();
-    m.insert("type".into(), serde_json::Value::String("object".into()));
-    Arc::new(m)
-}
 
 fn build_tools() -> Vec<Tool> {
     vec![
@@ -184,32 +160,6 @@ impl EmailMcpServer {
         }
     }
 
-    fn json_result<T: Serialize>(data: &T) -> CallToolResult {
-        match serde_json::to_string_pretty(data) {
-            Ok(json) => CallToolResult::success(vec![Content::text(json)]),
-            Err(e) => CallToolResult::error(vec![Content::text(format!("Serialization error: {e}"))]),
-        }
-    }
-
-    fn error_result(msg: &str) -> CallToolResult {
-        CallToolResult::error(vec![Content::text(msg.to_string())])
-    }
-
-    fn get_str(args: &serde_json::Value, key: &str) -> Option<String> {
-        args.get(key).and_then(|v| v.as_str()).map(String::from)
-    }
-
-    fn get_i64(args: &serde_json::Value, key: &str) -> Option<i64> {
-        args.get(key).and_then(|v| v.as_i64())
-    }
-
-    fn get_str_array(args: &serde_json::Value, key: &str) -> Vec<String> {
-        args.get(key)
-            .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-            .unwrap_or_default()
-    }
-
     async fn send_via_resend(
         &self,
         from: &str,
@@ -256,22 +206,22 @@ impl EmailMcpServer {
     // ---- Tool handlers ----
 
     async fn handle_send_email(&self, args: &serde_json::Value) -> CallToolResult {
-        let to = Self::get_str_array(args, "to");
+        let to = get_str_array(args, "to");
         if to.is_empty() {
-            return Self::error_result("Missing required: to (array of emails)");
+            return error_result("Missing required: to (array of emails)");
         }
-        let subject = match Self::get_str(args, "subject") {
+        let subject = match get_str(args, "subject") {
             Some(s) => s,
-            None => return Self::error_result("Missing required: subject"),
+            None => return error_result("Missing required: subject"),
         };
-        let html = match Self::get_str(args, "html") {
+        let html = match get_str(args, "html") {
             Some(h) => h,
-            None => return Self::error_result("Missing required: html"),
+            None => return error_result("Missing required: html"),
         };
-        let from = Self::get_str(args, "from")
+        let from = get_str(args, "from")
             .unwrap_or_else(|| "DataXLR8 <noreply@dataxlr8.ai>".into());
-        let cc = Self::get_str_array(args, "cc");
-        let text = Self::get_str(args, "text").unwrap_or_default();
+        let cc = get_str_array(args, "cc");
+        let text = get_str(args, "text").unwrap_or_default();
 
         let id = uuid::Uuid::new_v4().to_string();
 
@@ -302,22 +252,22 @@ impl EmailMcpServer {
         {
             Ok(email) => {
                 info!(id = id, status = status, to = ?to, "Email processed");
-                Self::json_result(&email)
+                json_result(&email)
             }
-            Err(e) => Self::error_result(&format!("Failed to log email: {e}")),
+            Err(e) => error_result(&format!("Failed to log email: {e}")),
         }
     }
 
     async fn handle_send_template_email(&self, args: &serde_json::Value) -> CallToolResult {
-        let template_name = match Self::get_str(args, "template") {
+        let template_name = match get_str(args, "template") {
             Some(t) => t,
-            None => return Self::error_result("Missing required: template"),
+            None => return error_result("Missing required: template"),
         };
-        let to = Self::get_str_array(args, "to");
+        let to = get_str_array(args, "to");
         if to.is_empty() {
-            return Self::error_result("Missing required: to");
+            return error_result("Missing required: to");
         }
-        let cc = Self::get_str_array(args, "cc");
+        let cc = get_str_array(args, "cc");
         let variables = args.get("variables").cloned().unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
 
         // Load template
@@ -331,7 +281,7 @@ impl EmailMcpServer {
 
         let tmpl = match tmpl {
             Some(t) => t,
-            None => return Self::error_result(&format!("Template '{template_name}' not found")),
+            None => return error_result(&format!("Template '{template_name}' not found")),
         };
 
         // Substitute variables
@@ -374,29 +324,29 @@ impl EmailMcpServer {
         {
             Ok(email) => {
                 info!(id = id, template = template_name, status = status, "Template email processed");
-                Self::json_result(&email)
+                json_result(&email)
             }
-            Err(e) => Self::error_result(&format!("Failed to log email: {e}")),
+            Err(e) => error_result(&format!("Failed to log email: {e}")),
         }
     }
 
     async fn handle_create_template(&self, args: &serde_json::Value) -> CallToolResult {
-        let name = match Self::get_str(args, "name") {
+        let name = match get_str(args, "name") {
             Some(n) => n,
-            None => return Self::error_result("Missing required: name"),
+            None => return error_result("Missing required: name"),
         };
-        let subject = match Self::get_str(args, "subject") {
+        let subject = match get_str(args, "subject") {
             Some(s) => s,
-            None => return Self::error_result("Missing required: subject"),
+            None => return error_result("Missing required: subject"),
         };
-        let html_body = match Self::get_str(args, "html_body") {
+        let html_body = match get_str(args, "html_body") {
             Some(h) => h,
-            None => return Self::error_result("Missing required: html_body"),
+            None => return error_result("Missing required: html_body"),
         };
-        let from_addr = Self::get_str(args, "from_addr")
+        let from_addr = get_str(args, "from_addr")
             .unwrap_or_else(|| "DataXLR8 <noreply@dataxlr8.ai>".into());
-        let description = Self::get_str(args, "description").unwrap_or_default();
-        let variables = Self::get_str_array(args, "variables");
+        let description = get_str(args, "description").unwrap_or_default();
+        let variables = get_str_array(args, "variables");
         let id = uuid::Uuid::new_v4().to_string();
 
         match sqlx::query_as::<_, EmailTemplate>(
@@ -418,9 +368,9 @@ impl EmailMcpServer {
         {
             Ok(tmpl) => {
                 info!(name = name, "Created/updated email template");
-                Self::json_result(&tmpl)
+                json_result(&tmpl)
             }
-            Err(e) => Self::error_result(&format!("Failed to create template: {e}")),
+            Err(e) => error_result(&format!("Failed to create template: {e}")),
         }
     }
 
@@ -429,14 +379,14 @@ impl EmailMcpServer {
             .fetch_all(self.db.pool())
             .await
         {
-            Ok(templates) => Self::json_result(&templates),
-            Err(e) => Self::error_result(&format!("Database error: {e}")),
+            Ok(templates) => json_result(&templates),
+            Err(e) => error_result(&format!("Database error: {e}")),
         }
     }
 
     async fn handle_list_sent_emails(&self, args: &serde_json::Value) -> CallToolResult {
-        let status = Self::get_str(args, "status");
-        let limit = Self::get_i64(args, "limit").unwrap_or(50);
+        let status = get_str(args, "status");
+        let limit = get_i64(args, "limit").unwrap_or(50);
 
         let (sql, bind) = match &status {
             Some(s) => (
@@ -456,8 +406,8 @@ impl EmailMcpServer {
         };
 
         match result {
-            Ok(emails) => Self::json_result(&emails),
-            Err(e) => Self::error_result(&format!("Database error: {e}")),
+            Ok(emails) => json_result(&emails),
+            Err(e) => error_result(&format!("Database error: {e}")),
         }
     }
 
@@ -473,7 +423,7 @@ impl EmailMcpServer {
         )
         .fetch_all(self.db.pool()).await.unwrap_or_default();
 
-        Self::json_result(&EmailStats {
+        json_result(&EmailStats {
             total_sent: sent.0,
             total_failed: failed.0,
             total_dry_run: dry_run.0,
@@ -528,7 +478,7 @@ impl ServerHandler for EmailMcpServer {
                 "list_templates" => self.handle_list_templates().await,
                 "list_sent_emails" => self.handle_list_sent_emails(&args).await,
                 "email_stats" => self.handle_email_stats().await,
-                _ => Self::error_result(&format!("Unknown tool: {}", request.name)),
+                _ => error_result(&format!("Unknown tool: {}", request.name)),
             };
 
             Ok(result)
