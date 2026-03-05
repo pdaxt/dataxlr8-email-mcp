@@ -6,6 +6,9 @@ use tracing::info;
 mod db;
 mod tools;
 
+#[cfg(test)]
+mod tests;
+
 use tools::EmailMcpServer;
 
 #[tokio::main]
