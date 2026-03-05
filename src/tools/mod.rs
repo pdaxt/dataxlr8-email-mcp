@@ -48,6 +48,26 @@ pub struct EmailStats {
     pub recent: Vec<SentEmail>,
 }
 
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct Sequence {
+    pub id: String,
+    pub name: String,
+    pub steps: serde_json::Value,
+    pub status: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct SequenceEnrollment {
+    pub id: String,
+    pub sequence_id: String,
+    pub contact_email: String,
+    pub current_step: i32,
+    pub status: String,
+    pub next_send_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
 // ============================================================================
 // Resend API types
 // ============================================================================
@@ -134,6 +154,77 @@ fn build_tools() -> Vec<Tool> {
             name: "email_stats".into(),
             title: None,
             description: Some("Get email sending statistics".into()),
+            input_schema: empty_schema(),
+            output_schema: None, annotations: None, execution: None, icons: None, meta: None,
+        },
+        Tool {
+            name: "create_sequence".into(),
+            title: None,
+            description: Some(
+                "Create an outreach sequence with multiple steps. Each step has delay_days, subject, html, step_number.".into(),
+            ),
+            input_schema: make_schema(serde_json::json!({
+                "name": { "type": "string", "description": "Unique sequence name" },
+                "steps": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "step_number": { "type": "integer", "description": "Step order (0-based)" },
+                            "delay_days": { "type": "integer", "description": "Days to wait before sending this step" },
+                            "subject": { "type": "string", "description": "Email subject" },
+                            "html": { "type": "string", "description": "HTML body" }
+                        },
+                        "required": ["step_number", "delay_days", "subject", "html"]
+                    },
+                    "description": "Array of sequence steps"
+                }
+            }), vec!["name", "steps"]),
+            output_schema: None, annotations: None, execution: None, icons: None, meta: None,
+        },
+        Tool {
+            name: "enroll_contact".into(),
+            title: None,
+            description: Some("Enroll a contact email into an outreach sequence".into()),
+            input_schema: make_schema(serde_json::json!({
+                "sequence_id": { "type": "string", "description": "Sequence ID" },
+                "contact_email": { "type": "string", "description": "Contact email to enroll" }
+            }), vec!["sequence_id", "contact_email"]),
+            output_schema: None, annotations: None, execution: None, icons: None, meta: None,
+        },
+        Tool {
+            name: "get_sequence_status".into(),
+            title: None,
+            description: Some("Get sequence details with all enrolled contacts and their progress".into()),
+            input_schema: make_schema(serde_json::json!({
+                "sequence_id": { "type": "string", "description": "Sequence ID" }
+            }), vec!["sequence_id"]),
+            output_schema: None, annotations: None, execution: None, icons: None, meta: None,
+        },
+        Tool {
+            name: "advance_sequence".into(),
+            title: None,
+            description: Some(
+                "Process all active enrollments where next_send_at <= now. Sends the next email in sequence, advances step, sets next_send_at or completes.".into(),
+            ),
+            input_schema: make_schema(serde_json::json!({
+                "sequence_id": { "type": "string", "description": "Optional: only advance enrollments in this sequence" }
+            }), vec![]),
+            output_schema: None, annotations: None, execution: None, icons: None, meta: None,
+        },
+        Tool {
+            name: "pause_enrollment".into(),
+            title: None,
+            description: Some("Pause an active enrollment to stop sending".into()),
+            input_schema: make_schema(serde_json::json!({
+                "enrollment_id": { "type": "string", "description": "Enrollment ID to pause" }
+            }), vec!["enrollment_id"]),
+            output_schema: None, annotations: None, execution: None, icons: None, meta: None,
+        },
+        Tool {
+            name: "list_sequences".into(),
+            title: None,
+            description: Some("List all outreach sequences".into()),
             input_schema: empty_schema(),
             output_schema: None, annotations: None, execution: None, icons: None, meta: None,
         },
@@ -430,6 +521,322 @@ impl EmailMcpServer {
             recent,
         })
     }
+
+    // ---- Sequence handlers ----
+
+    async fn handle_create_sequence(&self, args: &serde_json::Value) -> CallToolResult {
+        let name = match get_str(args, "name") {
+            Some(n) => n,
+            None => return error_result("Missing required: name"),
+        };
+        let steps = match args.get("steps") {
+            Some(s) if s.is_array() => s.clone(),
+            _ => return error_result("Missing required: steps (must be a JSON array)"),
+        };
+
+        let id = uuid::Uuid::new_v4().to_string();
+
+        match sqlx::query_as::<_, Sequence>(
+            "INSERT INTO email.sequences (id, name, steps) VALUES ($1, $2, $3) RETURNING *",
+        )
+        .bind(&id)
+        .bind(&name)
+        .bind(&steps)
+        .fetch_one(self.db.pool())
+        .await
+        {
+            Ok(seq) => {
+                info!(id = id, name = name, "Created sequence");
+                json_result(&seq)
+            }
+            Err(e) => error_result(&format!("Failed to create sequence: {e}")),
+        }
+    }
+
+    async fn handle_enroll_contact(&self, args: &serde_json::Value) -> CallToolResult {
+        let sequence_id = match get_str(args, "sequence_id") {
+            Some(s) => s,
+            None => return error_result("Missing required: sequence_id"),
+        };
+        let contact_email = match get_str(args, "contact_email") {
+            Some(e) => e,
+            None => return error_result("Missing required: contact_email"),
+        };
+
+        // Verify sequence exists and load steps
+        let seq: Option<Sequence> = sqlx::query_as(
+            "SELECT * FROM email.sequences WHERE id = $1",
+        )
+        .bind(&sequence_id)
+        .fetch_optional(self.db.pool())
+        .await
+        .unwrap_or(None);
+
+        let seq = match seq {
+            Some(s) => s,
+            None => return error_result(&format!("Sequence '{sequence_id}' not found")),
+        };
+
+        if seq.status != "active" {
+            return error_result(&format!("Sequence is {}, not active", seq.status));
+        }
+
+        // Calculate first send time from step 0's delay_days
+        let first_delay = seq.steps.as_array()
+            .and_then(|arr| arr.iter().find(|s| s.get("step_number").and_then(|n| n.as_i64()) == Some(0)))
+            .and_then(|s| s.get("delay_days").and_then(|d| d.as_i64()))
+            .unwrap_or(0);
+
+        let next_send_at = chrono::Utc::now() + chrono::Duration::days(first_delay);
+        let id = uuid::Uuid::new_v4().to_string();
+
+        match sqlx::query_as::<_, SequenceEnrollment>(
+            "INSERT INTO email.sequence_enrollments (id, sequence_id, contact_email, current_step, next_send_at) \
+             VALUES ($1, $2, $3, 0, $4) RETURNING *",
+        )
+        .bind(&id)
+        .bind(&sequence_id)
+        .bind(&contact_email)
+        .bind(next_send_at)
+        .fetch_one(self.db.pool())
+        .await
+        {
+            Ok(enrollment) => {
+                info!(sequence_id = sequence_id, email = contact_email, "Enrolled contact");
+                json_result(&enrollment)
+            }
+            Err(e) => {
+                if e.to_string().contains("unique") || e.to_string().contains("duplicate") {
+                    error_result(&format!("Contact '{contact_email}' already enrolled in this sequence"))
+                } else {
+                    error_result(&format!("Failed to enroll contact: {e}"))
+                }
+            }
+        }
+    }
+
+    async fn handle_get_sequence_status(&self, args: &serde_json::Value) -> CallToolResult {
+        let sequence_id = match get_str(args, "sequence_id") {
+            Some(s) => s,
+            None => return error_result("Missing required: sequence_id"),
+        };
+
+        let seq: Option<Sequence> = sqlx::query_as(
+            "SELECT * FROM email.sequences WHERE id = $1",
+        )
+        .bind(&sequence_id)
+        .fetch_optional(self.db.pool())
+        .await
+        .unwrap_or(None);
+
+        let seq = match seq {
+            Some(s) => s,
+            None => return error_result(&format!("Sequence '{sequence_id}' not found")),
+        };
+
+        let enrollments: Vec<SequenceEnrollment> = sqlx::query_as(
+            "SELECT * FROM email.sequence_enrollments WHERE sequence_id = $1 ORDER BY created_at",
+        )
+        .bind(&sequence_id)
+        .fetch_all(self.db.pool())
+        .await
+        .unwrap_or_default();
+
+        json_result(&serde_json::json!({
+            "sequence": seq,
+            "enrollments": enrollments,
+            "total_enrolled": enrollments.len(),
+            "active": enrollments.iter().filter(|e| e.status == "active").count(),
+            "completed": enrollments.iter().filter(|e| e.status == "completed").count(),
+            "paused": enrollments.iter().filter(|e| e.status == "paused").count(),
+        }))
+    }
+
+    async fn handle_advance_sequence(&self, args: &serde_json::Value) -> CallToolResult {
+        let sequence_filter = get_str(args, "sequence_id");
+
+        // Find all active enrollments ready to send
+        let enrollments: Vec<SequenceEnrollment> = if let Some(ref sid) = sequence_filter {
+            sqlx::query_as(
+                "SELECT * FROM email.sequence_enrollments \
+                 WHERE status = 'active' AND next_send_at <= now() AND sequence_id = $1",
+            )
+            .bind(sid)
+            .fetch_all(self.db.pool())
+            .await
+            .unwrap_or_default()
+        } else {
+            sqlx::query_as(
+                "SELECT * FROM email.sequence_enrollments \
+                 WHERE status = 'active' AND next_send_at <= now()",
+            )
+            .fetch_all(self.db.pool())
+            .await
+            .unwrap_or_default()
+        };
+
+        let mut sent_count = 0i64;
+        let mut completed_count = 0i64;
+        let mut failed_count = 0i64;
+        let mut errors: Vec<String> = Vec::new();
+
+        for enrollment in &enrollments {
+            // Load sequence
+            let seq: Option<Sequence> = sqlx::query_as(
+                "SELECT * FROM email.sequences WHERE id = $1",
+            )
+            .bind(&enrollment.sequence_id)
+            .fetch_optional(self.db.pool())
+            .await
+            .unwrap_or(None);
+
+            let seq = match seq {
+                Some(s) => s,
+                None => {
+                    errors.push(format!("{}: sequence not found", enrollment.id));
+                    continue;
+                }
+            };
+
+            // Find current step
+            let steps = match seq.steps.as_array() {
+                Some(a) => a,
+                None => {
+                    errors.push(format!("{}: invalid steps JSON", enrollment.id));
+                    continue;
+                }
+            };
+
+            let step = steps.iter().find(|s| {
+                s.get("step_number").and_then(|n| n.as_i64()) == Some(enrollment.current_step as i64)
+            });
+
+            let step = match step {
+                Some(s) => s,
+                None => {
+                    // No more steps — mark completed
+                    let _ = sqlx::query(
+                        "UPDATE email.sequence_enrollments SET status = 'completed', next_send_at = NULL WHERE id = $1",
+                    )
+                    .bind(&enrollment.id)
+                    .execute(self.db.pool())
+                    .await;
+                    completed_count += 1;
+                    continue;
+                }
+            };
+
+            let subject = step.get("subject").and_then(|v| v.as_str()).unwrap_or("(no subject)");
+            let html = step.get("html").and_then(|v| v.as_str()).unwrap_or("");
+            let from = "DataXLR8 <noreply@dataxlr8.ai>";
+
+            // Send email
+            let to = vec![enrollment.contact_email.clone()];
+            let (status, resend_id, error) = match self.send_via_resend(from, &to, &[], subject, html).await {
+                Ok(rid) => ("sent".to_string(), Some(rid), None),
+                Err(e) if e == "dry_run" => ("dry_run".to_string(), None, None),
+                Err(e) => ("failed".to_string(), None, Some(e)),
+            };
+
+            // Log sent email
+            let email_id = uuid::Uuid::new_v4().to_string();
+            let _ = sqlx::query(
+                "INSERT INTO email.sent_emails (id, from_addr, to_addrs, cc_addrs, subject, html_body, resend_id, status, error, metadata) \
+                 VALUES ($1, $2, $3, '{}', $4, $5, $6, $7, $8, $9)",
+            )
+            .bind(&email_id)
+            .bind(from)
+            .bind(&to)
+            .bind(subject)
+            .bind(html)
+            .bind(&resend_id)
+            .bind(&status)
+            .bind(&error)
+            .bind(serde_json::json!({"sequence_id": enrollment.sequence_id, "enrollment_id": enrollment.id, "step": enrollment.current_step}))
+            .execute(self.db.pool())
+            .await;
+
+            if status == "failed" {
+                failed_count += 1;
+                errors.push(format!("{}: send failed — {}", enrollment.contact_email, error.unwrap_or_default()));
+                continue;
+            }
+
+            sent_count += 1;
+
+            // Advance to next step
+            let next_step = enrollment.current_step + 1;
+            let next_step_data = steps.iter().find(|s| {
+                s.get("step_number").and_then(|n| n.as_i64()) == Some(next_step as i64)
+            });
+
+            if let Some(ns) = next_step_data {
+                let delay = ns.get("delay_days").and_then(|d| d.as_i64()).unwrap_or(1);
+                let next_send = chrono::Utc::now() + chrono::Duration::days(delay);
+                let _ = sqlx::query(
+                    "UPDATE email.sequence_enrollments SET current_step = $1, next_send_at = $2 WHERE id = $3",
+                )
+                .bind(next_step)
+                .bind(next_send)
+                .bind(&enrollment.id)
+                .execute(self.db.pool())
+                .await;
+            } else {
+                // No more steps
+                let _ = sqlx::query(
+                    "UPDATE email.sequence_enrollments SET current_step = $1, status = 'completed', next_send_at = NULL WHERE id = $2",
+                )
+                .bind(next_step)
+                .bind(&enrollment.id)
+                .execute(self.db.pool())
+                .await;
+                completed_count += 1;
+            }
+        }
+
+        json_result(&serde_json::json!({
+            "processed": enrollments.len(),
+            "sent": sent_count,
+            "completed": completed_count,
+            "failed": failed_count,
+            "errors": errors
+        }))
+    }
+
+    async fn handle_pause_enrollment(&self, args: &serde_json::Value) -> CallToolResult {
+        let enrollment_id = match get_str(args, "enrollment_id") {
+            Some(e) => e,
+            None => return error_result("Missing required: enrollment_id"),
+        };
+
+        match sqlx::query_as::<_, SequenceEnrollment>(
+            "UPDATE email.sequence_enrollments SET status = 'paused', next_send_at = NULL \
+             WHERE id = $1 AND status = 'active' RETURNING *",
+        )
+        .bind(&enrollment_id)
+        .fetch_optional(self.db.pool())
+        .await
+        {
+            Ok(Some(e)) => {
+                info!(id = enrollment_id, "Paused enrollment");
+                json_result(&e)
+            }
+            Ok(None) => error_result(&format!("Enrollment '{enrollment_id}' not found or not active")),
+            Err(e) => error_result(&format!("Failed to pause enrollment: {e}")),
+        }
+    }
+
+    async fn handle_list_sequences(&self) -> CallToolResult {
+        match sqlx::query_as::<_, Sequence>(
+            "SELECT * FROM email.sequences ORDER BY created_at DESC",
+        )
+        .fetch_all(self.db.pool())
+        .await
+        {
+            Ok(seqs) => json_result(&seqs),
+            Err(e) => error_result(&format!("Database error: {e}")),
+        }
+    }
 }
 
 // ============================================================================
@@ -478,6 +885,12 @@ impl ServerHandler for EmailMcpServer {
                 "list_templates" => self.handle_list_templates().await,
                 "list_sent_emails" => self.handle_list_sent_emails(&args).await,
                 "email_stats" => self.handle_email_stats().await,
+                "create_sequence" => self.handle_create_sequence(&args).await,
+                "enroll_contact" => self.handle_enroll_contact(&args).await,
+                "get_sequence_status" => self.handle_get_sequence_status(&args).await,
+                "advance_sequence" => self.handle_advance_sequence(&args).await,
+                "pause_enrollment" => self.handle_pause_enrollment(&args).await,
+                "list_sequences" => self.handle_list_sequences().await,
                 _ => error_result(&format!("Unknown tool: {}", request.name)),
             };
 
