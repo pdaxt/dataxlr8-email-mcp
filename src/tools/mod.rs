@@ -6,6 +6,14 @@ use rmcp::ServerHandler;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
+
+// ============================================================================
+// Validation constants
+// ============================================================================
+
+const MAX_NAME_LEN: usize = 500;
+const MAX_SUBJECT_LEN: usize = 1000;
+const MAX_CONTENT_LEN: usize = 100_000;
 // ============================================================================
 // Data types
 // ============================================================================
@@ -302,11 +310,21 @@ impl EmailMcpServer {
             return error_result("Missing required: to (array of emails)");
         }
         let subject = match get_str(args, "subject") {
-            Some(s) => s,
+            Some(s) => {
+                let trimmed = s.trim().to_string();
+                if trimmed.is_empty() { return error_result("Parameter 'subject' must not be empty"); }
+                if trimmed.len() > MAX_SUBJECT_LEN { return error_result(&format!("'subject' exceeds {} chars", MAX_SUBJECT_LEN)); }
+                trimmed
+            }
             None => return error_result("Missing required: subject"),
         };
         let html = match get_str(args, "html") {
-            Some(h) => h,
+            Some(h) => {
+                let trimmed = h.trim().to_string();
+                if trimmed.is_empty() { return error_result("Parameter 'html' must not be empty"); }
+                if trimmed.len() > MAX_CONTENT_LEN { return error_result(&format!("'html' exceeds {} chars", MAX_CONTENT_LEN)); }
+                trimmed
+            }
             None => return error_result("Missing required: html"),
         };
         let from = get_str(args, "from")
@@ -351,7 +369,12 @@ impl EmailMcpServer {
 
     async fn handle_send_template_email(&self, args: &serde_json::Value) -> CallToolResult {
         let template_name = match get_str(args, "template") {
-            Some(t) => t,
+            Some(t) => {
+                let trimmed = t.trim().to_string();
+                if trimmed.is_empty() { return error_result("Parameter 'template' must not be empty"); }
+                if trimmed.len() > MAX_NAME_LEN { return error_result(&format!("'template' exceeds {} chars", MAX_NAME_LEN)); }
+                trimmed
+            }
             None => return error_result("Missing required: template"),
         };
         let to = get_str_array(args, "to");
@@ -423,15 +446,30 @@ impl EmailMcpServer {
 
     async fn handle_create_template(&self, args: &serde_json::Value) -> CallToolResult {
         let name = match get_str(args, "name") {
-            Some(n) => n,
+            Some(n) => {
+                let trimmed = n.trim().to_string();
+                if trimmed.is_empty() { return error_result("Parameter 'name' must not be empty"); }
+                if trimmed.len() > MAX_NAME_LEN { return error_result(&format!("'name' exceeds {} chars", MAX_NAME_LEN)); }
+                trimmed
+            }
             None => return error_result("Missing required: name"),
         };
         let subject = match get_str(args, "subject") {
-            Some(s) => s,
+            Some(s) => {
+                let trimmed = s.trim().to_string();
+                if trimmed.is_empty() { return error_result("Parameter 'subject' must not be empty"); }
+                if trimmed.len() > MAX_SUBJECT_LEN { return error_result(&format!("'subject' exceeds {} chars", MAX_SUBJECT_LEN)); }
+                trimmed
+            }
             None => return error_result("Missing required: subject"),
         };
         let html_body = match get_str(args, "html_body") {
-            Some(h) => h,
+            Some(h) => {
+                let trimmed = h.trim().to_string();
+                if trimmed.is_empty() { return error_result("Parameter 'html_body' must not be empty"); }
+                if trimmed.len() > MAX_CONTENT_LEN { return error_result(&format!("'html_body' exceeds {} chars", MAX_CONTENT_LEN)); }
+                trimmed
+            }
             None => return error_result("Missing required: html_body"),
         };
         let from_addr = get_str(args, "from_addr")
@@ -526,7 +564,12 @@ impl EmailMcpServer {
 
     async fn handle_create_sequence(&self, args: &serde_json::Value) -> CallToolResult {
         let name = match get_str(args, "name") {
-            Some(n) => n,
+            Some(n) => {
+                let trimmed = n.trim().to_string();
+                if trimmed.is_empty() { return error_result("Parameter 'name' must not be empty"); }
+                if trimmed.len() > MAX_NAME_LEN { return error_result(&format!("'name' exceeds {} chars", MAX_NAME_LEN)); }
+                trimmed
+            }
             None => return error_result("Missing required: name"),
         };
         let steps = match args.get("steps") {
