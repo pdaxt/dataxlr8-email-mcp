@@ -5,6 +5,10 @@ edition = "2024"
 description = "Email MCP server for DataXLR8 platform — Resend API, templates, logging"
 repository = "https://github.com/pdaxt/dataxlr8-email-mcp"
 
+
+[lib]
+name = "dataxlr8_email_mcp"
+path = "src/lib.rs"
 [dependencies]
 rmcp = { version = "0.17", features = ["server", "transport-io"] }
 dataxlr8-mcp-core = { path = "../dataxlr8-mcp-core" }
